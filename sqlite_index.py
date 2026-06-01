@@ -157,12 +157,14 @@ class SQLiteIndex:
 
         query = query.lower().strip()
 
+        
         rows = list(self.cur.execute("""
             SELECT d.*, p.page_num, p.page_label, p.content
             FROM documents d
             JOIN pages p ON d.tcp = p.tcp
-        """))
-
+            WHERE (d.year BETWEEN ? AND ? OR d.year = 0)
+        """, (min_year, max_year)))
+        
         print("Rows pulled:", len(rows))
 
         for r in rows:
@@ -172,10 +174,12 @@ class SQLiteIndex:
             page_label = r[8]
             text = r[9]
 
-            matches = [
-                m.start()
-                for m in re.finditer(re.escape(query), text.lower())
-            ]
+            #matches = [
+             #   m.start()
+            #    for m in re.finditer(re.escape(query), text.lower())
+            #]
+
+            matches = [m.start() for m in re.finditer(re.escape(query), text, re.IGNORECASE)]
 
             if not matches:
                 continue

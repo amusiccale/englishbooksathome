@@ -128,7 +128,11 @@ class App(MainUI):
         df = pd.read_csv(path)
         self.csv_data = df.to_dict("records")
 
-        self.db = SQLiteIndex(path + ".db")
+        db_path = path + ".db"
+        self.db = SQLiteIndex(db_path)
+
+        print("Database loaded")
+
         self.csv_loaded = True
         self.update_status()
 
@@ -138,16 +142,34 @@ class App(MainUI):
             return
 
         self.root_dir = path
-        self.db.build_index(self.csv_data, self.root_dir)
+
+        print("XML directory set — no indexing performed")
+        QMessageBox.information(
+            self,
+            "Index Status",
+            "Index not rebuilt automatically.\nClick 'Rebuild Index' if needed."
+        )
 
         self.xml_loaded = True
         self.update_status()
+
 
     def rebuild_index(self):
         if not self.db or not self.root_dir:
             QMessageBox.warning(self, "Error", "Load CSV + XML first.")
             return
-        self.db.build_index(self.csv_data, self.root_dir)
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Rebuild",
+            "Rebuild the index? This may take a few minutes.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            print("Rebuilding index...")
+            self.db.build_index(self.csv_data, self.root_dir)
+            print("Index rebuild complete.")
 
     # ================= SEARCH =================
     def search(self):
@@ -157,7 +179,7 @@ class App(MainUI):
         if not self.db:
             return
 
-        # ✅ collect rows - allows us to "stack" advanced search with boolean operators
+        # ✅ collect advanced rows
         queries = []
 
         for (q, field, mode_box, op_box) in self.search_rows:
@@ -174,7 +196,7 @@ class App(MainUI):
         if not queries:
             return
 
-        # ✅ year guardrails (unchanged)
+        # ✅ year filter
         min_year = self.date_min.value()
         max_year = self.date_max.value()
         if min_year > max_year:
@@ -183,39 +205,31 @@ class App(MainUI):
         print("Advanced queries:", queries)
         print("Year filter:", min_year, max_year)
 
-        def apply_mode(query, mode):
-            if mode == "Exact":
-                return rf"\b{query}\b"
-            elif mode == "Phrase":
-                return query
-            elif mode == "Fuzzy":
-                # SAFE fuzzy gate (no offset breakage)
-                return query
-            else:
-                return query
-
-        # ✅ first query
+        # ✅ ---- FIRST QUERY ----
         base = queries[0]
 
         print("Query:", base["query"], "| Mode:", base["mode"])
 
-        pattern = apply_mode(base["query"], base["mode"])
-        results = self.db.search(pattern, min_year, max_year)
-        
-        
+        results = self.db.search(
+            base["query"],
+            min_year,
+            max_year,
+            mode=base["mode"]
+        )
 
         print("Documents returned (base):", len(results))
 
-        # ✅ apply additional rows
+        # ✅ ---- BOOLEAN STACKING ----
         for q in queries[1:]:
 
             print(f"Applying {q['op']} with:", q["query"], "| Mode:", q["mode"])
 
-            pattern = apply_mode(q["query"], q["mode"])
-            new_results = self.db.search(pattern, min_year, max_year)
-
-            
-            new_results = self.db.search(q["query"], min_year, max_year)
+            new_results = self.db.search(
+                q["query"],
+                min_year,
+                max_year,
+                mode=q["mode"]
+            )
 
             print("Documents returned (new):", len(new_results))
 
@@ -232,15 +246,13 @@ class App(MainUI):
 
         print("Final documents returned:", len(results))
 
-        headers = [self.results.headerItem().text(i) for i in range(self.results.columnCount())]
-
+        # ✅ ---- BUILD UI ----
         for tcp, data in results.items():
 
             pages = data["pages"]
             meta = data["meta"]
             total_hits = sum(len(p["matches"]) for p in pages)
 
-            # ✅ CLEAN, SINGLE row construction (no duplicates, no overrides)
             parent = QTreeWidgetItem([
                 safe_str(meta.get("TCP", tcp)),
                 safe_str(meta.get("Author", "")),
@@ -251,18 +263,15 @@ class App(MainUI):
                 str(total_hits)
             ])
 
-            # ✅ numeric sorting helpers (safe)
             parent.setData(6, Qt.ItemDataRole.UserRole, total_hits)
             parent.setData(2, Qt.ItemDataRole.UserRole, meta.get("Year", 0))
 
-            # ✅ attach data
             parent.setData(0, Qt.ItemDataRole.UserRole, {
                 "type": "doc",
                 "meta": meta,
                 "pages": pages
             })
 
-            # ✅ children (unchanged, but confirm correct loop)
             for p in pages:
                 child = QTreeWidgetItem([
                     "", "", "", f"Page {p['page_label']}", "", "", str(len(p["matches"]))
@@ -276,8 +285,7 @@ class App(MainUI):
                 parent.addChild(child)
 
             self.results.addTopLevelItem(parent)
-            
-            
+
         self.results.collapseAll()
 
         try:
@@ -286,6 +294,143 @@ class App(MainUI):
             pass
 
         self.results.itemClicked.connect(self.handle_click)
+        
+##    def search(self):
+##
+##        self.results.clear()
+##
+##        if not self.db:
+##            return
+##
+##        # ✅ collect rows - allows us to "stack" advanced search with boolean operators
+##        queries = []
+##
+##        for (q, field, mode_box, op_box) in self.search_rows:
+##            text = q.text().strip()
+##            if not text:
+##                continue
+##
+##            queries.append({
+##                "query": text,
+##                "mode": mode_box.currentText(),
+##                "op": op_box.currentText()
+##            })
+##
+##        if not queries:
+##            return
+##
+##        # ✅ year guardrails (unchanged)
+##        min_year = self.date_min.value()
+##        max_year = self.date_max.value()
+##        if min_year > max_year:
+##            min_year, max_year = max_year, min_year
+##
+##        print("Advanced queries:", queries)
+##        print("Year filter:", min_year, max_year)
+##
+##        def apply_mode(query, mode):
+##            if mode == "Exact":
+##                return rf"\b{query}\b"
+##            elif mode == "Phrase":
+##                return query
+##            elif mode == "Fuzzy":
+##                # SAFE fuzzy gate (no offset breakage)
+##                return query
+##            else:
+##                return query
+##
+##        # ✅ first query
+##        base = queries[0]
+##
+##        print("Query:", base["query"], "| Mode:", base["mode"])
+##
+##        pattern = apply_mode(base["query"], base["mode"])
+##        results = self.db.search(pattern, min_year, max_year)
+##        
+##        
+##
+##        print("Documents returned (base):", len(results))
+##
+##        # ✅ apply additional rows
+##        for q in queries[1:]:
+##
+##            print(f"Applying {q['op']} with:", q["query"], "| Mode:", q["mode"])
+##
+##            pattern = apply_mode(q["query"], q["mode"])
+##            new_results = self.db.search(pattern, min_year, max_year)
+##
+##            
+##            new_results = self.db.search(q["query"], min_year, max_year)
+##
+##            print("Documents returned (new):", len(new_results))
+##
+##            if q["op"] == "AND":
+##                results = {k: v for k, v in results.items() if k in new_results}
+##
+##            elif q["op"] == "OR":
+##                for k, v in new_results.items():
+##                    if k not in results:
+##                        results[k] = v
+##
+##            elif q["op"] == "NOT":
+##                results = {k: v for k, v in results.items() if k not in new_results}
+##
+##        print("Final documents returned:", len(results))
+##
+##        headers = [self.results.headerItem().text(i) for i in range(self.results.columnCount())]
+##
+##        for tcp, data in results.items():
+##
+##            pages = data["pages"]
+##            meta = data["meta"]
+##            total_hits = sum(len(p["matches"]) for p in pages)
+##
+##            # ✅ CLEAN, SINGLE row construction (no duplicates, no overrides)
+##            parent = QTreeWidgetItem([
+##                safe_str(meta.get("TCP", tcp)),
+##                safe_str(meta.get("Author", "")),
+##                safe_str(meta.get("Date", "")),
+##                safe_str(meta.get("Title", "")),
+##                safe_str(meta.get("Publisher", "")),
+##                safe_str(meta.get("Collection", "")),
+##                str(total_hits)
+##            ])
+##
+##            # ✅ numeric sorting helpers (safe)
+##            parent.setData(6, Qt.ItemDataRole.UserRole, total_hits)
+##            parent.setData(2, Qt.ItemDataRole.UserRole, meta.get("Year", 0))
+##
+##            # ✅ attach data
+##            parent.setData(0, Qt.ItemDataRole.UserRole, {
+##                "type": "doc",
+##                "meta": meta,
+##                "pages": pages
+##            })
+##
+##            # ✅ children (unchanged, but confirm correct loop)
+##            for p in pages:
+##                child = QTreeWidgetItem([
+##                    "", "", "", f"Page {p['page_label']}", "", "", str(len(p["matches"]))
+##                ])
+##
+##                child.setData(0, Qt.ItemDataRole.UserRole, {
+##                    "type": "page",
+##                    "page": p
+##                })
+##
+##                parent.addChild(child)
+##
+##            self.results.addTopLevelItem(parent)
+##            
+##            
+##        self.results.collapseAll()
+##
+##        try:
+##            self.results.itemClicked.disconnect()
+##        except:
+##            pass
+##
+##        self.results.itemClicked.connect(self.handle_click)
 
     # ================= CLICK =================
     def handle_click(self, item):

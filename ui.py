@@ -184,7 +184,9 @@ class MainUI(QWidget):
         field.addItems(["Full Text", "Author", "Title", "Publisher", "Collection"])
 
         mode = QComboBox()
-        mode.addItems(["Fuzzy", "Exact", "Phrase", "Boolean"])
+        #==== move Fuzzy last to avoid accidental clicks
+        #mode.addItems(["Fuzzy", "Exact", "Phrase", "Boolean"])
+        mode.addItems(["Exact", "Phrase", "Boolean", "Fuzzy"])
 
         op = QComboBox()
         op.addItems(["AND", "OR", "NOT"])

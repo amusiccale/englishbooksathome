@@ -264,194 +264,46 @@ class SQLiteIndex:
                 WHERE f.content MATCH ?
             """, (fts_query,)).fetchall()
 
-## revised Fuzzy logic, 2 June 26
-        elif mode == "Fuzzy":
+            ## revised Fuzzy logic, 2 June 26
+            MAX_FTS_ROWS = 150   # per pass (total ≈ 300)
 
-            # ✅ limit FTS at SQL level
-            MAX_FTS_ROWS = 200
-
-            fts_rows = self.cur.execute(f"""
+            # ✅ FIRST PASS
+            fts_rows_primary = self.cur.execute("""
                 SELECT p.tcp, p.page_num, p.page_label, p.content
                 FROM pages_fts f
                 JOIN pages p ON f.tcp = p.tcp AND f.page_num = p.page_num
                 WHERE f.content MATCH ?
-                LIMIT {MAX_FTS_ROWS}
-            """, (fts_query,)).fetchall()
+                LIMIT ?
+            """, (fts_query, MAX_FTS_ROWS)).fetchall()
 
-            if fts_rows:
-                rows = fts_rows
-            else:
+            # ✅ SECOND PASS (shifted window)
+            fts_rows_secondary = self.cur.execute("""
+                SELECT p.tcp, p.page_num, p.page_label, p.content
+                FROM pages_fts f
+                JOIN pages p ON f.tcp = p.tcp AND f.page_num = p.page_num
+                WHERE f.content MATCH ?
+                LIMIT ? OFFSET ?
+            """, (fts_query, MAX_FTS_ROWS, MAX_FTS_ROWS)).fetchall()
+
+            # ✅ COMBINE + DEDUPE
+            seen = set()
+            rows = []
+
+            for tcp, page_num, page_label, text in fts_rows_primary + fts_rows_secondary:
+                key = (tcp, page_num)
+                if key not in seen:
+                    rows.append((tcp, page_num, page_label, text))
+                    seen.add(key)
+
+
+            # ✅ fallback remains unchanged
+            if not rows:
                 print("FTS miss → fuzzy fallback to full scan")
                 rows = self.cur.execute("""
                     SELECT tcp, page_num, page_label, content
                     FROM pages
                 """).fetchall()
                 rows = rows[:200]
-
-            # ✅ LIMIT pages per document (preserve edition diversity)
-            MAX_PAGES_PER_DOC = 3
-            doc_counts = {}
-            diverse_rows = []
-
-            for tcp, page_num, page_label, text in rows:
-                count = doc_counts.get(tcp, 0)
-                if count < MAX_PAGES_PER_DOC:
-                    diverse_rows.append((tcp, page_num, page_label, text))
-                    doc_counts[tcp] = count + 1
-
-            rows = diverse_rows
-
-
-            # ✅ SINGLE filtering stage (keep only one!)
-            preview = query_lower[:4] if len(query_lower) >= 4 else query_lower
-
-            filtered_rows = [
-                (tcp, page_num, page_label, text)
-                for tcp, page_num, page_label, text in rows
-                if preview in text.lower()
-            ]
-
-            # ✅ fallback safety
-            if not filtered_rows:
-                filtered_rows = rows
-
-            # ✅ FINAL DIVERSITY-PRESERVING CAP
-            MAX_FINAL_ROWS = 150 if len(query_lower) >= 6 else 120
-
-            if len(filtered_rows) > MAX_FINAL_ROWS:
-                half = MAX_FINAL_ROWS // 2
-                rows = filtered_rows[:half] + filtered_rows[-half:]
-            else:
-                rows = filtered_rows
-
-##        elif mode == "Fuzzy":
-##
-##            # ✅ limit FTS at SQL level (fastest win)
-##            MAX_FTS_ROWS = 200
-##
-##            fts_rows = self.cur.execute(f"""
-##                SELECT p.tcp, p.page_num, p.page_label, p.content
-##                FROM pages_fts f
-##                JOIN pages p ON f.tcp = p.tcp AND f.page_num = p.page_num
-##                WHERE f.content MATCH ?
-##                LIMIT {MAX_FTS_ROWS}
-##            """, (fts_query,)).fetchall()
-##
-##            if fts_rows:
-##                rows = fts_rows
-##            else:
-##                print("FTS miss → fuzzy fallback to full scan")
-##                rows = self.cur.execute("""
-##                    SELECT tcp, page_num, page_label, content
-##                    FROM pages
-##                """).fetchall()
-##
-##                rows = rows[:200]   # ✅ cap fallback
-##
-##            # ✅ LIMIT pages per document (critical for recall)
-##            MAX_PAGES_PER_DOC = 3
-##
-##            doc_counts = {}
-##            diverse_rows = []
-##
-##            for tcp, page_num, page_label, text in rows:
-##                count = doc_counts.get(tcp, 0)
-##
-##                if count < MAX_PAGES_PER_DOC:
-##                    diverse_rows.append((tcp, page_num, page_label, text))
-##                    doc_counts[tcp] = count + 1
-##
-##            # ✅ replace rows with diversified set
-##            rows = diverse_rows
-##
-##
-##            # ✅ SMART substring filter (lightweight, never zero-out)
-##            preview = query_lower[:4] if len(query_lower) >= 4 else query_lower
-##
-##            filtered_rows = [
-##                (tcp, page_num, page_label, text)
-##                for tcp, page_num, page_label, text in rows
-##                if preview in text.lower()
-##            ]
-##
-##            # ✅ SAFE fallback (never allow empty candidate set)
-##            if not filtered_rows:
-##                filtered_rows = rows
-##
-##            # ✅ FINAL CAP (keeps fuzzy fast)
-##            MAX_FINAL_ROWS = 120
-##
-##            if len(filtered_rows) > MAX_FINAL_ROWS:
-##                half = MAX_FINAL_ROWS // 2
-##                rows = filtered_rows[:half] + filtered_rows[-half:]
-##            else:
-##                rows = filtered_rows
-##
-##                
-##            #====================    
-##            # ✅ SMART anchor selection
-##            anchors = []
-##
-##            if len(query_lower) >= 6:
-##                anchors = [
-##                    query_lower[:4],
-##                    query_lower[-4:],
-##                    query_lower[1:5]
-##                ]
-##            elif len(query_lower) >= 4:
-##                anchors = [query_lower[:3]]
-##            else:
-##                anchors = [query_lower]
-##
-##            filtered_rows = []
-##
-##            for tcp, page_num, page_label, text in rows:
-##                t = text.lower()
-##
-##                if any(anchor in t for anchor in anchors):
-##                    filtered_rows.append((tcp, page_num, page_label, text))
-##
-##            # ✅ NEW: progressive fallback instead of all-or-nothing
-##            if len(filtered_rows) < 10:
-##                print("Anchor filter too strict → relaxing")
-##
-##                weaker_anchor = query_lower[:3] if len(query_lower) >= 3 else query_lower
-##
-##                filtered_rows = [
-##                    (tcp, page_num, page_label, text)
-##                    for tcp, page_num, page_label, text in rows
-##                    if weaker_anchor in text.lower()
-##                ]
-##
-##            # ✅ FINAL fallback (don’t overfilter to zero)
-##            if not filtered_rows:
-##                print("Filter eliminated everything → using raw rows")
-##                filtered_rows = rows[:200]
-##
-##            # ✅ FINAL cap
-##            rows = filtered_rows[:120]
-##
-##            # ✅ ===== NEW: FAST substring prefilter =====
-##            preview = query_lower[:4] if len(query_lower) >= 4 else query_lower
-##
-##            filtered_rows = []
-##            for tcp, page_num, page_label, text in rows:
-##                if preview in text.lower():
-##                    filtered_rows.append((tcp, page_num, page_label, text))
-##
-##            # ✅ fallback if filter is too strict
-##            if not filtered_rows:
-##                filtered_rows = rows
-##
-##            # ✅ FINAL row cap BEFORE fuzzy runs
-##            # ✅ balance early + later rows for better coverage
-##            MAX_FINAL_ROWS = 150 if len(query_lower) >= 6 else 120
-##
-##            if len(filtered_rows) > MAX_FINAL_ROWS:
-##                half = MAX_FINAL_ROWS // 2
-##                rows = filtered_rows[:half] + filtered_rows[-half:]
-##            else:
-##                rows = filtered_rows
 
 
 ##-----------EXACT MODE---------
@@ -464,10 +316,86 @@ class SQLiteIndex:
 
         # ✅ Debug
         print("Rows pulled:", len(rows))
+
+        #======================
+        #---metadata lookup, added 2 June 26====
+        #======================
+        
+        #=====✅ METADATA SEARCH (author + title)
+        meta_rows = self.cur.execute("""
+            SELECT tcp FROM documents
+            WHERE LOWER(author) LIKE ?
+               OR LOWER(title) LIKE ?
+        """, (f"%{query_lower}%", f"%{query_lower}%")).fetchall()
+
+        meta_tcps = set(r[0] for r in meta_rows)
+
+        if meta_tcps:
+            meta_pages = []
+
+            for tcp in meta_tcps:
+                pages = self.cur.execute("""
+                    SELECT tcp, page_num, page_label, content
+                    FROM pages
+                    WHERE tcp = ?
+                    LIMIT 10
+                """, (tcp,)).fetchall()
+
+                meta_pages.extend(pages)
+
+            # ✅ merge + dedupe
+            seen = set((t[0], t[1]) for t in rows)
+            for r in meta_pages:
+                key = (r[0], r[1])
+                if key not in seen:
+                    rows.append(r)
+                    seen.add(key)
+        
         # =========================
         # PROCESS MATCHES
         # =========================
+        # ✅ ULTRA-FAST STRAT: pre-classify rows (order-preserving)
+        pre_filtered = []
+        needs_fuzzy = []
 
+        for tcp, page_num, page_label, text in rows:
+            text_lower = text.lower()
+
+            # ✅ direct text hits
+            if query_lower in text_lower:
+                pre_filtered.append((tcp, page_num, page_label, text))
+
+            # ✅ metadata hits must survive
+            elif tcp in meta_tcps:
+                pre_filtered.append((tcp, page_num, page_label, text))
+
+            # ✅ possible fuzzy candidates
+            elif query_lower[:3] in text_lower:
+                needs_fuzzy.append((tcp, page_num, page_label, text))
+
+
+        # ✅ cap fuzzy workload AFTER loop
+        MAX_FUZZY_ROWS = 30
+        needs_fuzzy = needs_fuzzy[:MAX_FUZZY_ROWS]
+
+        # ✅ track fuzzy rows
+        fuzzy_only_set = set((tcp, page_num) for tcp, page_num, _, _ in needs_fuzzy)
+
+        # ✅ merge WITHOUT breaking document order
+        seen = set()
+        final_rows = []
+
+        for r in rows:
+            key = (r[0], r[1])
+            if key in seen:
+                continue
+
+            if r in pre_filtered or r in needs_fuzzy:
+                final_rows.append(r)
+                seen.add(key)
+
+        rows = final_rows
+        
         for tcp, page_num, page_label, text in rows:
 
             text_lower = text.lower()
@@ -482,7 +410,14 @@ class SQLiteIndex:
                 ]
 
                 if not matches:
-                    continue
+                    if tcp in meta_tcps:
+                        matches = [0]   # ✅ PRIORITY FIX
+                    else:
+                        approx = text_lower.find(query_lower[:3])
+                        if approx != -1:
+                            matches = [approx]
+                        else:
+                            continue
 
             # ========= PHRASE =========
             elif mode == "Phrase":
@@ -492,60 +427,58 @@ class SQLiteIndex:
                 ]
 
                 if not matches:
-                    continue
+                    if tcp in meta_tcps:
+                        matches = [0]   # ✅ PRIORITY FIX
+                    else:
+                        approx = text_lower.find(query_lower[:3])
+                        if approx != -1:
+                            matches = [approx]
+                        else:
+                            continue
 
-            # ========= FUZZY, now with rows capped at 500 for speed  =========
+            # ========= FUZZY =========
             else:
                 from rapidfuzz import fuzz
 
-                norm_text = normalize_text(text)
-                norm_query = normalize_text(query)
+                # ✅ FAST PATH FIRST: substring match (handles most real cases)
+                if query_lower in text_lower:
+                    found = True
 
-                # ✅ FAST prefilter (skip clearly irrelevant pages)
-                if len(query_lower) >= 6:
-                    if query_lower[:6] not in text_lower and norm_query[:6] not in norm_text:
-                        continue
+                else:
+                    # ✅ lightweight prefilter (skip obvious misses fast)
+                    if len(query_lower) >= 6:
+                        if query_lower[:5] not in text_lower:
+                            continue
 
-                # ✅ FIND ANCHOR POSITIONS (instead of scanning whole text)
-                anchor = query_lower[:3] if len(query_lower) >= 3 else query_lower
+                    norm_text = normalize_text(text)
+                    norm_query = normalize_text(query)
 
-                candidate_positions = [
-                    m.start()
-                    for m in re.finditer(re.escape(anchor), text_lower)
-                ]
-
-                # ✅ LIMIT WORK (critical for speed)
-                if len(candidate_positions) > 30:
-                    candidate_positions = candidate_positions[:30]
-
-                found = False
-
-                for pos in candidate_positions:
-                    window = text_lower[max(0, pos-25):pos+len(query_lower)+25]
-
-                    if fuzz.ratio(normalize_text(window), norm_query) >= 70:
-                        found = True
-                        break
-
-                if not found:
-                    # ✅ fallback: allow rows that have exact substring matches
-                    if query_lower in text_lower:
+                    # ✅ SINGLE fuzzy check (no anchors, no windows)
+                    if fuzz.partial_ratio(norm_query, norm_text) >= 75:
                         found = True
                     else:
                         continue
 
-                # ✅ REGEX MATCH (for KWIC/offset stability)
+                # ✅ REGEX MATCH (for KWIC offsets)
                 matches = [
                     m.start()
                     for m in re.finditer(re.escape(query_lower), text_lower)
                 ]
 
+                # ✅ fallback for fuzzy / exact / phrase hits
                 if not matches:
-                    approx = text_lower.find(anchor)
-                    if approx != -1:
-                        matches = [approx]
+                    # ✅ FIRST priority: metadata (author/title)
+                    if tcp in meta_tcps:
+                        matches = [0]   # force survival
+
                     else:
-                        continue
+                        approx = text_lower.find(query_lower[:3])
+                        if approx != -1:
+                            matches = [approx]
+                        else:
+                            continue
+                
+
             # =========================
             # BUILD RESULTS
             # =========================

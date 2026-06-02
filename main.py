@@ -261,11 +261,29 @@ class App(MainUI):
         print("Final documents returned:", len(results))
 
         # ✅ ---- BUILD UI ----
+        query_lower = base["query"].lower()
+        
         for tcp, data in results.items():
 
             pages = data["pages"]
             meta = data["meta"]
+            #total_hits = sum(len(p["matches"]) for p in pages)
             total_hits = sum(len(p["matches"]) for p in pages)
+
+            # ✅ ranking boosters
+            title_match = query_lower in safe_str(meta.get("Title", "")).lower()
+            author_match = query_lower in safe_str(meta.get("Author", "")).lower()
+
+            score = total_hits
+
+            # ✅ boost title heavily
+            if title_match:
+                score += 1000
+
+            # ✅ boost author moderately
+            if author_match:
+                score += 500
+
 
             parent = NumericTreeItem([
                 safe_str(meta.get("TCP", tcp)),
@@ -277,7 +295,7 @@ class App(MainUI):
                 str(total_hits)
             ])
 
-            parent.setData(6, Qt.ItemDataRole.UserRole, total_hits)
+            parent.setData(6, Qt.ItemDataRole.UserRole, score)
             parent.setData(2, Qt.ItemDataRole.UserRole, meta.get("Year", 0))
             
             # ✅ load ALL pages for this document
@@ -502,7 +520,28 @@ class App(MainUI):
         if event.key() == Qt.Key.Key_Escape and getattr(self, "_fs", False):
             self.toggle_fullscreen()
 
+    #===========RIS EXPORT==========
+    def export_selected(self, meta):
+        from PyQt6.QtWidgets import QFileDialog
 
+        # ✅ prompt for file save location
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export RIS",
+            "",
+            "RIS Files (*.ris)"
+        )
+
+        if not path:
+            return
+
+        try:
+            export_ris(meta, path)
+            print(f"RIS export successful: {path}")
+            QMessageBox.information(self, "Export Complete", f"Saved to:\n{path}")
+        except Exception as e:
+            print(f"RIS export failed: {e}")
+        
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
